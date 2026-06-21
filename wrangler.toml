@@ -1,0 +1,18 @@
+# AuraFlow Music Player - Cloudflare Pages Configuration
+# Copy this file to your project root when deploying to Cloudflare Pages
+
+name = "auraflow-music-player"
+compatibility_date = "2024-01-01"
+
+# R2 Bucket binding for music file storage
+# Create in Cloudflare Dashboard: R2 > Create Bucket > name it "auraflow-music"
+[[r2_buckets]]
+binding = "MUSIC_BUCKET"
+bucket_name = "auraflow-music"
+
+# D1 Database binding for song metadata
+# Create in Cloudflare Dashboard: D1 > Create Database > name it "auraflow-music-db"
+[[d1_databases]]
+binding = "DB"
+database_name = "auraflow-db"
+database_id = "6215d73c-84fa-4188-95f1-5ac34abeb43b"
