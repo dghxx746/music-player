@@ -64,10 +64,11 @@ canvas {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  background-image: url('cd94399c05b2429385f678244940dc58.jpg');
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  opacity: 0;
+  opacity: 0.24;
   transition: opacity 0.8s ease;
 }
 
@@ -100,11 +101,12 @@ canvas {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  pointer-events: none;
 }
 
-#app > * {
-  pointer-events: auto;
+/* ==================== Touch-friendly ==================== */
+button, input[type="range"] {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ==================== Header ==================== */
@@ -303,6 +305,8 @@ canvas {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .playlist-empty {
@@ -329,6 +333,7 @@ canvas {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all var(--transition);
+  touch-action: manipulation;
 }
 
 .playlist-item:hover {
@@ -543,14 +548,14 @@ canvas {
   background: white;
   position: absolute;
   top: 50%;
-  right: -7px;
-  transform: translateY(-50%) scale(0);
+  left: 0%;
+  transform: translate(-50%, -50%) scale(0);
   box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
   transition: transform 0.15s ease;
 }
 
 .progress-track:hover .progress-thumb {
-  transform: translateY(-50%) scale(1);
+  transform: translate(-50%, -50%) scale(1);
 }
 
 .progress-times {
@@ -729,6 +734,7 @@ canvas {
 }
 
 .small-btn-clear {
+  display: none;
   background: rgba(247, 90, 111, 0.1);
   border: 1px solid rgba(247, 90, 111, 0.2);
   color: rgba(247, 90, 111, 0.7);
@@ -857,23 +863,174 @@ canvas {
   color: #f75a6f;
 }
 
+/* ==================== Sync Modal ==================== */
+.sync-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.sync-dialog {
+  position: relative;
+  width: min(340px, 100%);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.sync-dialog h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.sync-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.sync-qr {
+  width: 220px;
+  height: 220px;
+  border-radius: var(--radius-sm);
+  background: white;
+  padding: 8px;
+}
+
+.sync-link-input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-size: 12px;
+  outline: none;
+}
+
+/* ==================== Mobile Playlist Toggle ==================== */
+.mobile-playlist-btn {
+  display: none;
+}
+
 /* ==================== Responsive ==================== */
 @media (max-width: 1100px) {
   .panel-right {
     display: none;
   }
   :root {
-    --panel-width: 240px;
+    --panel-width: 260px;
   }
 }
 
 @media (max-width: 768px) {
   .header { padding: 12px 16px; }
-  .main-content { padding: 0 12px 12px; gap: 8px; }
-  .panel-left { display: none; }
-  .cover-disc { width: 200px; height: 200px; }
-  .cover-inner { width: 140px; height: 140px; }
-  .controls { padding: 12px 16px; }
+  .main-content { padding: 0 10px 10px; gap: 8px; }
+  .cover-disc { width: 180px; height: 180px; }
+  .cover-inner { width: 120px; height: 120px; }
+  .controls { padding: 12px 14px; gap: 10px; }
   .volume-slider { width: 80px; }
   .header-track-info { display: none; }
+
+  /* Show mobile playlist toggle button */
+  .mobile-playlist-btn {
+    display: flex;
+  }
+
+  /* Left panel becomes slide-in overlay on mobile */
+  .panel-left {
+    position: fixed;
+    top: 0;
+    left: -82vw;
+    bottom: 0;
+    z-index: 1000;
+    width: 80vw;
+    max-width: 320px;
+    transform: none;
+    transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: rgba(8, 8, 24, 0.97);
+    pointer-events: auto;
+    touch-action: pan-y;
+    overflow: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .panel-left.mobile-open {
+    left: 0;
+  }
+
+  /* Mobile playlist backdrop */
+  .mobile-playlist-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 140;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+
+  .mobile-playlist-backdrop.show {
+    opacity: 1;
+    pointer-events: none;
+  }
+
+  /* Bigger touch targets */
+  .ctrl-btn { padding: 14px; }
+  .ctrl-btn.play-btn { padding: 20px; }
+  .icon-btn { padding: 12px; }
+
+  /* Progress bar touch-friendly */
+  .progress-track { height: 8px; border-radius: 4px; }
+  .progress-thumb { width: 18px; height: 18px; transform: translate(-50%, -50%) scale(1); }
+  .progress-times { font-size: 10px; margin-top: 4px; }
+
+  /* Playback row spacing */
+  .playback-row { gap: 6px; }
+
+  /* Toast wider on mobile */
+  .toast-notification {
+    left: 10%;
+    right: 10%;
+    transform: translateX(0) translateY(20px);
+    max-width: none;
+  }
+  .toast-notification.show {
+    transform: translateX(0) translateY(0);
+  }
+
+  /* Playlist items - always show fav/remove on touch */
+  .playlist-item .pi-fav { opacity: 0.5; }
+  .playlist-item .pi-remove { opacity: 0.5; }
+}
+
+@media (max-width: 400px) {
+  .header { padding: 10px 12px; }
+  .main-content { padding: 0 8px 8px; }
+  .cover-disc { width: 150px; height: 150px; }
+  .cover-inner { width: 100px; height: 100px; }
+  .controls { padding: 10px 12px; gap: 8px; }
+  .playback-row { gap: 4px; }
+  .volume-slider { width: 60px; }
+  .viz-mode-label { font-size: 9px; }
 }

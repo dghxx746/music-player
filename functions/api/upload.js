@@ -21,6 +21,7 @@ const ALLOWED_TYPES = {
 };
 
 const ALLOWED_EXTENSIONS = /\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i;
+const PUBLIC_USER_ID = 'public_library';
 
 function generateUUID() {
   return crypto.randomUUID();
@@ -32,6 +33,10 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   };
+}
+
+function getUserId(request, formData) {
+  return PUBLIC_USER_ID;
 }
 
 export async function onRequestPost(context) {
@@ -61,7 +66,7 @@ export async function onRequestPost(context) {
       });
     }
 
-    const userId = 'demo-user';
+    const userId = getUserId(request, formData);
     const id = generateUUID();
     const name = fileName.replace(/\.[^/.]+$/, '');
     const type = fileType || 'audio/unknown';

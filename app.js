@@ -3,12 +3,83 @@
  * Web Audio API + Canvas 可视化 + Cloudflare 云端音乐库
  */
 
+// ==================== Anonymous User Identity ====================
+const UserIdentity = {
+  KEY: 'auraflow_user_id',
+  PARAMS: ['sync', 'user_id'],
+  PUBLIC_ID: 'public_library',
+
+  getId() {
+    try {
+      localStorage.setItem(this.KEY, this.PUBLIC_ID);
+      this.clearIncomingIdFromUrl();
+      return this.PUBLIC_ID;
+    } catch {
+      return this.PUBLIC_ID;
+    }
+  },
+
+  isValid(id) {
+    return /^[a-zA-Z0-9_-]{8,80}$/.test(String(id || '').trim());
+  },
+
+  getIncomingId() {
+    const params = new URLSearchParams(window.location.search);
+    for (const name of this.PARAMS) {
+      const value = params.get(name);
+      if (this.isValid(value)) return value.trim();
+    }
+    return null;
+  },
+
+  clearIncomingIdFromUrl() {
+    const url = new URL(window.location.href);
+    let changed = false;
+    for (const name of this.PARAMS) {
+      if (url.searchParams.has(name)) {
+        url.searchParams.delete(name);
+        changed = true;
+      }
+    }
+    if (changed) {
+      window.history.replaceState({}, document.title, url.toString());
+    }
+  },
+
+  getShareUrl() {
+    const url = new URL(window.location.href);
+    for (const name of this.PARAMS) url.searchParams.delete(name);
+    return url.toString();
+  }
+};
+
 // ==================== Cloud API ====================
 const CloudAPI = {
   BASE: '/api',
+  available: null, // null = unknown, true/false
+
+  userQuery() {
+    return `user_id=${encodeURIComponent(UserIdentity.getId())}`;
+  },
+
+  url(path) {
+    const separator = path.includes('?') ? '&' : '?';
+    return `${this.BASE}${path}${separator}${this.userQuery()}`;
+  },
+
+  async checkAvailability() {
+    if (this.available !== null) return this.available;
+    try {
+      const res = await fetch(this.url('/songs'), { method: 'GET', signal: AbortSignal.timeout(3000) });
+      this.available = res.ok || res.status === 200;
+    } catch {
+      this.available = false;
+    }
+    return this.available;
+  },
 
   async getSongs() {
-    const res = await fetch(`${this.BASE}/songs`);
+    const res = await fetch(this.url('/songs'));
     if (!res.ok) throw new Error('获取歌曲列表失败');
     return res.json();
   },
@@ -16,7 +87,8 @@ const CloudAPI = {
   async upload(file) {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${this.BASE}/upload`, { method: 'POST', body: formData });
+    formData.append('user_id', UserIdentity.getId());
+    const res = await fetch(this.url('/upload'), { method: 'POST', body: formData });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: '上传失败' }));
       throw new Error(err.error || '上传失败');
@@ -25,20 +97,19 @@ const CloudAPI = {
   },
 
   async updateSong(id, data) {
-    const res = await fetch(`${this.BASE}/songs/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: '更新失败' }));
-      throw new Error(err.error || '更新失败');
-    }
-    return res.json();
+    try {
+      const res = await fetch(this.url(`/songs/${encodeURIComponent(id)}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) return null;
+      return res.json();
+    } catch { return null; }
   },
 
   async deleteSong(id) {
-    const res = await fetch(`${this.BASE}/songs/${id}`, { method: 'DELETE' });
+    const res = await fetch(this.url(`/songs/${encodeURIComponent(id)}`), { method: 'DELETE' });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: '删除失败' }));
       throw new Error(err.error || '删除失败');
@@ -47,7 +118,7 @@ const CloudAPI = {
   },
 
   getStreamUrl(id) {
-    return `${this.BASE}/stream/${id}`;
+    return this.url(`/stream/${encodeURIComponent(id)}`);
   }
 };
 
@@ -97,7 +168,7 @@ const THEMES = [
 ];
 
 // ==================== Visualization Modes ====================
-const VIZ_MODES = ['波形', '频谱柱', '环形', '粒子', '星云'];
+const VIZ_MODES = ['频谱柱', '无'];
 
 // ==================== State ====================
 const State = {
@@ -110,12 +181,15 @@ const State = {
   isMuted: false,
   themeIndex: 0,
   vizModeIndex: 0,
-  vizMode: '波形',
+  vizMode: '频谱柱',
   audioContext: null,
   analyser: null,
   sourceNode: null,
   gainNode: null,
   currentAudio: null,
+  currentLoadingAudio: null,
+  isLoading: false,
+  loadToken: 0,
   dataArray: null,
   freqArray: null,
   bufferLength: 0,
@@ -150,32 +224,78 @@ const AudioEngine = {
     }
   },
 
-  loadTrack(track) {
+  loadTrack(track, autoplay = false) {
     return new Promise((resolve, reject) => {
+      const token = ++State.loadToken;
+      State.isLoading = true;
+      const stopAudio = (audio) => {
+        if (!audio) return;
+        try { audio.pause(); } catch {}
+        try { audio.removeAttribute('src'); audio.load(); } catch {}
+      };
+      if (State.currentLoadingAudio) {
+        stopAudio(State.currentLoadingAudio);
+        State.currentLoadingAudio = null;
+      }
       if (State.currentAudio) {
         this.savePosition();
-        State.currentAudio.pause();
-        State.currentAudio.src = '';
+        stopAudio(State.currentAudio);
+        State.currentAudio = null;
       }
       if (State.sourceNode) {
         try { State.sourceNode.disconnect(); } catch(e) {}
+        State.sourceNode = null;
       }
 
       const audio = new Audio();
+      State.currentLoadingAudio = audio;
       audio.crossOrigin = 'anonymous';
       audio.src = track.url; // /api/stream/:id for cloud songs
-
-      audio.addEventListener('canplaythrough', () => {
-        if (State.audioContext.state === 'suspended') {
-          State.audioContext.resume();
-        }
+      let sourceAttached = false;
+      const attachAudio = () => {
+        if (sourceAttached) return;
+        sourceAttached = true;
         State.sourceNode = State.audioContext.createMediaElementSource(audio);
         State.sourceNode.connect(State.analyser);
         State.currentAudio = audio;
+      };
+
+      if (autoplay) {
+        if (State.audioContext.state === 'suspended') {
+          State.audioContext.resume();
+        }
+        attachAudio();
+        State.currentLoadingAudio = null;
+        State.isLoading = false;
+        State.isPlaying = true;
+        audio.play().catch(() => {
+          State.isPlaying = false;
+          UI.updatePlayButton();
+        });
+      }
+
+      audio.addEventListener('canplaythrough', () => {
+        if (token !== State.loadToken) {
+          stopAudio(audio);
+          reject(Object.assign(new Error('stale audio load'), { name: 'StaleLoadError' }));
+          return;
+        }
+        if (State.audioContext.state === 'suspended') {
+          State.audioContext.resume();
+        }
+        attachAudio();
+        State.currentLoadingAudio = null;
+        State.isLoading = false;
         resolve(audio);
       }, { once: true });
 
       audio.addEventListener('error', () => {
+        if (token !== State.loadToken) {
+          reject(Object.assign(new Error('stale audio load'), { name: 'StaleLoadError' }));
+          return;
+        }
+        State.currentLoadingAudio = null;
+        State.isLoading = false;
         reject(new Error('无法加载音频文件'));
       }, { once: true });
 
@@ -296,53 +416,77 @@ const Playlist = {
       return;
     }
 
+    return this.addFilesFast(audioFiles);
+
     const wasEmpty = State.playlist.length === 0;
-    let uploaded = 0;
+    let added = 0;
     let failed = 0;
+    const cloudAvailable = await CloudAPI.checkAvailability();
 
     for (const file of audioFiles) {
       try {
-        UI.showToast(`正在上传: ${file.name}...`, 'info');
-        const result = await CloudAPI.upload(file);
-
-        // Add to playlist
-        const track = {
-          id: result.id,
-          name: result.name,
-          url: CloudAPI.getStreamUrl(result.id),
-          type: result.type || file.type || this.guessType(file.name),
-          size: result.size || file.size,
-          duration: 0,
-          favorite: false,
-          playCount: 0,
-          lastPosition: 0,
-          createdAt: new Date().toISOString(),
-        };
+        let track;
+        if (cloudAvailable) {
+          UI.showToast(`正在上传: ${file.name}...`, 'info');
+          const result = await CloudAPI.upload(file);
+          track = {
+            id: result.id,
+            name: result.name,
+            url: CloudAPI.getStreamUrl(result.id),
+            type: result.type || file.type || this.guessType(file.name),
+            size: result.size || file.size,
+            duration: 0,
+            favorite: false,
+            playCount: 0,
+            lastPosition: 0,
+            createdAt: new Date().toISOString(),
+          };
+        } else {
+          // Local mode: use blob URL directly
+          const id = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+          const url = URL.createObjectURL(file);
+          track = {
+            id,
+            name: file.name.replace(/\.[^/.]+$/, ''),
+            url,
+            type: file.type || this.guessType(file.name),
+            size: file.size,
+            duration: 0,
+            favorite: false,
+            playCount: 0,
+            lastPosition: 0,
+            createdAt: new Date().toISOString(),
+            _localBlob: file,
+          };
+        }
 
         State.playlist.unshift(track);
-        uploaded++;
+        added++;
 
-        // Get duration via temp audio
+        // Get duration
         const tempAudio = new Audio();
         tempAudio.src = track.url;
         tempAudio.addEventListener('loadedmetadata', () => {
           track.duration = tempAudio.duration;
-          CloudAPI.updateSong(track.id, { duration: tempAudio.duration }).catch(() => {});
+          if (cloudAvailable && track.id && !track.id.startsWith('local_')) {
+            CloudAPI.updateSong(track.id, { duration: tempAudio.duration }).catch(() => {});
+          }
           UI.renderPlaylist();
         });
         tempAudio.addEventListener('error', () => {});
       } catch (e) {
-        console.error('Upload failed:', file.name, e);
+        console.error('Add file failed:', file.name, e);
         failed++;
       }
     }
 
     UI.renderPlaylist();
 
-    if (uploaded > 0) {
-      UI.showToast(`成功上传 ${uploaded} 首歌曲${failed > 0 ? `，${failed} 首失败` : ''}`, 'success');
+    if (added > 0) {
+      const mode = cloudAvailable ? '上传' : '加载';
+      UI.showToast(`成功${mode} ${added} 首歌曲${failed > 0 ? `，${failed} 首失败` : ''}`, 'success');
     } else if (failed > 0) {
-      UI.showToast(`上传失败`, 'error');
+      UI.showToast('添加失败', 'error');
     }
 
     if (wasEmpty && State.playlist.length > 0) {
@@ -351,7 +495,108 @@ const Playlist = {
     }
   },
 
+  async addFilesFast(audioFiles) {
+    const wasEmpty = State.playlist.length === 0;
+    const newTracks = [];
+
+    for (const file of audioFiles) {
+      const id = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+      const url = URL.createObjectURL(file);
+      const track = {
+        id,
+        name: file.name.replace(/\.[^/.]+$/, ''),
+        url,
+        type: file.type || this.guessType(file.name),
+        size: file.size,
+        duration: 0,
+        favorite: false,
+        playCount: 0,
+        lastPosition: 0,
+        createdAt: new Date().toISOString(),
+        _localBlob: file,
+        _uploading: false,
+        _uploadFailed: false,
+      };
+
+      State.playlist.unshift(track);
+      newTracks.push(track);
+
+      const tempAudio = new Audio();
+      tempAudio.src = track.url;
+      tempAudio.addEventListener('loadedmetadata', () => {
+        track.duration = tempAudio.duration;
+        if (track.id && !track.id.startsWith('local_')) {
+          CloudAPI.updateSong(track.id, { duration: track.duration }).catch(() => {});
+        }
+        UI.renderPlaylist();
+      });
+      tempAudio.addEventListener('error', () => {});
+    }
+
+    UI.renderPlaylist();
+    UI.showToast(`已添加 ${newTracks.length} 首歌曲`, 'success');
+
+    if (wasEmpty && State.playlist.length > 0) {
+      State.currentIndex = 0;
+      this.playCurrent();
+    }
+
+    this.uploadLocalTracksInBackground(newTracks);
+  },
+
+  async uploadLocalTracksInBackground(tracks) {
+    const cloudAvailable = await CloudAPI.checkAvailability();
+    if (!cloudAvailable) return;
+
+    let uploaded = 0;
+    let failed = 0;
+
+    for (const track of tracks) {
+      if (!track._localBlob || !track.id.startsWith('local_')) continue;
+
+      track._uploading = true;
+      track._uploadFailed = false;
+      UI.renderPlaylist();
+
+      try {
+        const result = await CloudAPI.upload(track._localBlob);
+        track.id = result.id;
+        track.name = result.name || track.name;
+        track.url = CloudAPI.getStreamUrl(result.id);
+        track.type = result.type || track.type;
+        track.size = result.size || track.size;
+        track._uploading = false;
+        track._uploaded = true;
+        uploaded++;
+
+        if (track.duration) {
+          CloudAPI.updateSong(track.id, { duration: track.duration }).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Background upload failed:', track.name, e);
+        track._uploading = false;
+        track._uploadFailed = true;
+        failed++;
+      }
+
+      UI.renderPlaylist();
+    }
+
+    if (uploaded > 0 && failed === 0) {
+      UI.showToast(`已同步 ${uploaded} 首歌曲到云端`, 'success');
+    } else if (uploaded > 0 || failed > 0) {
+      UI.showToast(`云端同步完成：${uploaded} 成功，${failed} 失败`, failed > 0 ? 'error' : 'success');
+    }
+  },
+
   async restoreFromCloud() {
+    const cloudAvailable = await CloudAPI.checkAvailability();
+
+    if (!cloudAvailable) {
+      UI.showToast('本地模式 - 拖拽音乐文件开始播放', 'info');
+      return;
+    }
+
     try {
       UI.showToast('正在加载云端音乐库...', 'info');
       const songs = await CloudAPI.getSongs();
@@ -411,7 +656,7 @@ const Playlist = {
 
     const track = State.playlist[State.currentIndex];
     try {
-      await AudioEngine.loadTrack(track);
+      await AudioEngine.loadTrack(track, true);
       AudioEngine.play();
 
       // Update metadata
@@ -462,16 +707,23 @@ const Playlist = {
     this.playCurrent();
   },
 
-  toggleShuffle() {
-    State.isShuffle = !State.isShuffle;
-    Settings.save({ isShuffle: State.isShuffle });
-  },
-
-  toggleRepeat() {
-    const modes = ['none', 'all', 'one'];
-    const idx = modes.indexOf(State.repeatMode);
-    State.repeatMode = modes[(idx + 1) % modes.length];
-    Settings.save({ repeatMode: State.repeatMode });
+  // Play mode cycle: sequential → repeat-one → repeat-all → shuffle
+  cyclePlayMode() {
+    // Order: sequential (none, !shuffle) → repeat-one (one, !shuffle) → repeat-all (all, !shuffle) → shuffle (!repeat, shuffle)
+    if (!State.isShuffle && State.repeatMode === 'none') {
+      State.repeatMode = 'one';
+      State.isShuffle = false;
+    } else if (!State.isShuffle && State.repeatMode === 'one') {
+      State.repeatMode = 'all';
+      State.isShuffle = false;
+    } else if (!State.isShuffle && State.repeatMode === 'all') {
+      State.repeatMode = 'none';
+      State.isShuffle = true;
+    } else {
+      State.repeatMode = 'none';
+      State.isShuffle = false;
+    }
+    Settings.save({ repeatMode: State.repeatMode, isShuffle: State.isShuffle });
   },
 
   async removeTrack(index) {
@@ -486,8 +738,13 @@ const Playlist = {
       State.isPlaying = false;
     }
 
-    // Delete from cloud
-    if (track.id) {
+    // Revoke local blob URL if applicable
+    if (track._localBlob && track.url) {
+      try { URL.revokeObjectURL(track.url); } catch {}
+    }
+
+    // Delete from cloud (skip for local tracks)
+    if (track.id && !track.id.startsWith('local_')) {
       try {
         await CloudAPI.deleteSong(track.id);
       } catch (e) {
@@ -512,6 +769,51 @@ const Playlist = {
 
     UI.renderPlaylist();
     UI.showToast('歌曲已删除', 'success');
+  },
+
+  async clearLibrary() {
+    if (State.playlist.length === 0) {
+      UI.showToast('音乐库已经是空的', 'info');
+      return;
+    }
+
+    if (State.currentAudio) {
+      AudioEngine.savePosition();
+      State.currentAudio.pause();
+      State.currentAudio.src = '';
+      State.currentAudio = null;
+    }
+    State.isPlaying = false;
+
+    const failed = [];
+
+    for (const track of State.playlist) {
+      if (track.id && !track.id.startsWith('local_')) {
+        try {
+          await CloudAPI.deleteSong(track.id);
+        } catch (e) {
+          console.error('Clear song failed:', track.name, e);
+          failed.push(track);
+          continue;
+        }
+      }
+
+      if (track._localBlob && track.url) {
+        try { URL.revokeObjectURL(track.url); } catch {}
+      }
+    }
+
+    State.playlist = failed;
+    State.currentIndex = -1;
+    Settings.save({ lastTrackId: null, lastPosition: 0 });
+    UI.resetToDefault();
+    UI.renderPlaylist();
+
+    if (failed.length > 0) {
+      UI.showToast(`部分歌曲删除失败，剩余 ${failed.length} 首`, 'error');
+    } else {
+      UI.showToast('音乐库已清空', 'success');
+    }
   },
 
   async toggleFavorite(index) {
@@ -712,18 +1014,21 @@ const Visualizer = {
     if (!data) return;
 
     const barCount = 64;
+    const pairCount = barCount / 2;
     const gap = 3;
-    const barWidth = (this.width - gap * barCount) / barCount;
-    const step = Math.floor(State.bufferLength / barCount);
+    const visualWidth = Math.min(this.width * 0.88, 760);
+    const totalGap = gap * (barCount - 1);
+    const barWidth = Math.max(2, (visualWidth - totalGap) / barCount);
+    const totalWidth = barWidth * barCount + totalGap;
+    const centerX = this.width / 2;
+    const startX = centerX - totalWidth / 2;
+    const step = Math.max(1, Math.floor(State.bufferLength / pairCount));
 
-    for (let i = 0; i < barCount; i++) {
-      const value = data[i * step] / 255;
+    const drawBar = (x, value, t) => {
       const barHeight = value * this.height * 0.65;
-      const x = i * (barWidth + gap);
       const y = this.height - barHeight;
 
       const grad = ctx.createLinearGradient(x, this.height, x, y);
-      const t = i / barCount;
       if (t < 0.33) { grad.addColorStop(0, theme.accent); grad.addColorStop(1, theme.secondary); }
       else if (t < 0.66) { grad.addColorStop(0, theme.secondary); grad.addColorStop(1, theme.tertiary); }
       else { grad.addColorStop(0, theme.tertiary); grad.addColorStop(1, theme.accent); }
@@ -750,6 +1055,18 @@ const Visualizer = {
       ctx.fill();
       ctx.restore();
       ctx.shadowBlur = 0;
+    };
+
+    for (let i = 0; i < pairCount; i++) {
+      const value = data[i * step] / 255;
+      const rightIndex = pairCount + i;
+      const leftIndex = pairCount - 1 - i;
+      const rightX = startX + rightIndex * (barWidth + gap);
+      const leftX = startX + leftIndex * (barWidth + gap);
+      const t = i / pairCount;
+
+      drawBar(leftX, value, t);
+      drawBar(rightX, value, t);
     }
   },
 
@@ -923,6 +1240,41 @@ const UI = {
     this.updateTheme();
   },
 
+  createSyncControls() {
+    if (!document.getElementById('syncBtn')) {
+      const actions = document.querySelector('.header-actions');
+      const themeBtn = document.getElementById('themeBtn');
+      const btn = document.createElement('button');
+      btn.id = 'syncBtn';
+      btn.className = 'icon-btn';
+      btn.title = '同步到手机';
+      btn.innerHTML = `
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+          <line x1="12" y1="18" x2="12.01" y2="18"></line>
+          <path d="M9 7h6M9 11h6"></path>
+        </svg>
+      `;
+      actions?.insertBefore(btn, themeBtn || null);
+    }
+
+    if (!document.getElementById('syncModal')) {
+      const modal = document.createElement('div');
+      modal.id = 'syncModal';
+      modal.className = 'sync-modal hidden';
+      modal.innerHTML = `
+        <div class="sync-dialog glass-card">
+          <button id="syncCloseBtn" class="sync-close" title="关闭">×</button>
+          <h3>同步到手机</h3>
+          <img id="syncQrImage" class="sync-qr" alt="同步二维码" />
+          <input id="syncLinkInput" class="sync-link-input" readonly />
+          <button id="syncCopyBtn" class="small-btn glow-btn">复制链接</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+  },
+
   async restoreSettings() {
     const s = Settings.load();
     State.volume = s.volume;
@@ -931,19 +1283,12 @@ const UI = {
     State.isShuffle = s.isShuffle;
     State.themeIndex = s.themeIndex;
     State.vizModeIndex = s.vizModeIndex;
-    State.vizMode = VIZ_MODES[s.vizModeIndex] || '波形';
+    State.vizMode = VIZ_MODES[s.vizModeIndex] || '频谱柱';
 
     document.getElementById('volumeSlider').value = State.volume * 100;
     document.getElementById('vizModeLabel').textContent = State.vizMode;
 
-    if (State.isShuffle) {
-      document.getElementById('shuffleBtn').classList.add('active');
-    }
-    if (State.repeatMode !== 'none') {
-      const btn = document.getElementById('repeatBtn');
-      btn.classList.add('active');
-      btn.title = State.repeatMode === 'all' ? '列表循环' : '单曲循环';
-    }
+    this.updatePlayModeButton();
     this.updateVolumeIcon();
   },
 
@@ -965,17 +1310,10 @@ const UI = {
     document.getElementById('prevBtn').addEventListener('click', () => Playlist.prev());
     document.getElementById('nextBtn').addEventListener('click', () => Playlist.next());
 
-    document.getElementById('shuffleBtn').addEventListener('click', () => {
-      Playlist.toggleShuffle();
-      document.getElementById('shuffleBtn').classList.toggle('active', State.isShuffle);
-    });
-
-    document.getElementById('repeatBtn').addEventListener('click', () => {
-      Playlist.toggleRepeat();
-      const btn = document.getElementById('repeatBtn');
-      btn.classList.toggle('active', State.repeatMode !== 'none');
-      btn.title = State.repeatMode === 'none' ? '循环模式' :
-                  State.repeatMode === 'all' ? '列表循环' : '单曲循环';
+    // Play mode cycle button: sequential → repeat-one → repeat-all → shuffle
+    document.getElementById('playModeBtn').addEventListener('click', () => {
+      Playlist.cyclePlayMode();
+      this.updatePlayModeButton();
     });
 
     // Volume
@@ -1021,6 +1359,22 @@ const UI = {
       Settings.save({ themeIndex: State.themeIndex });
     });
 
+    document.getElementById('syncBtn')?.addEventListener('click', () => {
+      this.showSyncModal();
+    });
+
+    document.getElementById('syncCloseBtn')?.addEventListener('click', () => {
+      this.hideSyncModal();
+    });
+
+    document.getElementById('syncModal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'syncModal') this.hideSyncModal();
+    });
+
+    document.getElementById('syncCopyBtn')?.addEventListener('click', () => {
+      this.copySyncLink();
+    });
+
     // File input
     document.getElementById('addFilesBtn').addEventListener('click', () => {
       document.getElementById('fileInput').click();
@@ -1031,6 +1385,15 @@ const UI = {
         Playlist.addFiles(e.target.files);
         e.target.value = '';
       }
+    });
+
+    document.getElementById('clearLibraryBtn')?.addEventListener('click', () => {
+      if (State.playlist.length === 0) {
+        UI.showToast('音乐库已经是空的', 'info');
+        return;
+      }
+      const confirmed = window.confirm('确定要清空音乐库吗？云端歌曲会从 R2 和 D1 中删除。');
+      if (confirmed) Playlist.clearLibrary();
     });
 
     // Background image upload
@@ -1058,6 +1421,56 @@ const UI = {
       layer.classList.remove('has-image');
       document.getElementById('bgClearBtn').classList.add('hidden');
     });
+
+    // Mobile playlist toggle
+    const mobilePlaylistBtn = document.getElementById('mobilePlaylistBtn');
+    const mobileBackdrop = document.getElementById('mobilePlaylistBackdrop');
+    const panelLeft = document.querySelector('.panel-left');
+
+    function openMobilePlaylist() {
+      panelLeft?.classList.add('mobile-open');
+      mobileBackdrop?.classList.add('show');
+    }
+
+    function closeMobilePlaylist() {
+      panelLeft?.classList.remove('mobile-open');
+      mobileBackdrop?.classList.remove('show');
+    }
+
+    mobilePlaylistBtn?.addEventListener('click', () => {
+      if (panelLeft?.classList.contains('mobile-open')) {
+        closeMobilePlaylist();
+      } else {
+        openMobilePlaylist();
+      }
+    });
+
+    mobileBackdrop?.addEventListener('click', () => {
+      closeMobilePlaylist();
+    });
+
+    document.addEventListener('pointerdown', (e) => {
+      if (!panelLeft?.classList.contains('mobile-open')) return;
+      const target = e.target;
+      if (panelLeft.contains(target) || mobilePlaylistBtn?.contains(target)) return;
+      closeMobilePlaylist();
+    });
+
+    // Touch: swipe from left edge to open playlist
+    let touchStartX = 0;
+    document.addEventListener('touchstart', (e) => {
+      touchStartX = e.touches[0].clientX;
+    }, { passive: true });
+
+    document.addEventListener('touchend', (e) => {
+      const touchEndX = e.changedTouches[0].clientX;
+      const diffX = touchEndX - touchStartX;
+      if (touchStartX < 30 && diffX > 80) {
+        openMobilePlaylist();
+      } else if (panelLeft?.classList.contains('mobile-open') && diffX < -80) {
+        closeMobilePlaylist();
+      }
+    }, { passive: true });
 
     // Drag & Drop
     const dragOverlay = document.getElementById('dragOverlay');
@@ -1141,6 +1554,38 @@ const UI = {
     });
   },
 
+  showSyncModal() {
+    const link = UserIdentity.getShareUrl();
+    const modal = document.getElementById('syncModal');
+    const input = document.getElementById('syncLinkInput');
+    const qr = document.getElementById('syncQrImage');
+
+    if (input) input.value = link;
+    if (qr) {
+      qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=12&data=' + encodeURIComponent(link);
+    }
+    modal?.classList.remove('hidden');
+    this.copySyncLink(false);
+  },
+
+  hideSyncModal() {
+    document.getElementById('syncModal')?.classList.add('hidden');
+  },
+
+  async copySyncLink(showResult = true) {
+    const link = UserIdentity.getShareUrl();
+    const input = document.getElementById('syncLinkInput');
+    if (input) input.value = link;
+
+    try {
+      await navigator.clipboard.writeText(link);
+      if (showResult) this.showToast('同步链接已复制', 'success');
+    } catch {
+      input?.select();
+      if (showResult) this.showToast('可手动复制同步链接', 'info');
+    }
+  },
+
   showToast(message, type = 'info') {
     const existing = document.querySelector('.toast-notification');
     if (existing) existing.remove();
@@ -1172,6 +1617,37 @@ const UI = {
       playIcon.classList.remove('hidden');
       pauseIcon.classList.add('hidden');
       disc.classList.remove('spinning');
+    }
+  },
+
+  updatePlayModeButton() {
+    const btn = document.getElementById('playModeBtn');
+    const icons = {
+      sequential: btn.querySelector('.pm-sequential'),
+      repeatOne: btn.querySelector('.pm-repeat-one'),
+      repeatAll: btn.querySelector('.pm-repeat-all'),
+      shuffle: btn.querySelector('.pm-shuffle'),
+    };
+
+    // Hide all icons first
+    Object.values(icons).forEach(el => el?.classList.add('hidden'));
+
+    if (State.isShuffle) {
+      icons.shuffle?.classList.remove('hidden');
+      btn.title = '随机播放';
+      btn.classList.add('active');
+    } else if (State.repeatMode === 'one') {
+      icons.repeatOne?.classList.remove('hidden');
+      btn.title = '单曲循环';
+      btn.classList.add('active');
+    } else if (State.repeatMode === 'all') {
+      icons.repeatAll?.classList.remove('hidden');
+      btn.title = '列表循环';
+      btn.classList.add('active');
+    } else {
+      icons.sequential?.classList.remove('hidden');
+      btn.title = '顺序播放';
+      btn.classList.remove('active');
     }
   },
 
@@ -1231,6 +1707,7 @@ const UI = {
     document.getElementById('headerTrackName').textContent = '未在播放';
     document.title = 'AuraFlow - 音乐氛围播放器';
     document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressThumb').style.left = '0%';
     document.getElementById('currentTime').textContent = '0:00';
     document.getElementById('totalTime').textContent = '0:00';
     document.getElementById('trackDetail').innerHTML = `
@@ -1252,6 +1729,7 @@ const UI = {
       const ratio = duration ? (current / duration) * 100 : 0;
 
       document.getElementById('progressFill').style.width = ratio + '%';
+      document.getElementById('progressThumb').style.left = ratio + '%';
       document.getElementById('currentTime').textContent = this.formatTime(current);
       document.getElementById('totalTime').textContent = this.formatTime(duration);
 
@@ -1286,12 +1764,15 @@ const UI = {
     container.innerHTML = State.playlist.map((track, i) => {
       const isActive = i === State.currentIndex;
       const favClass = track.favorite ? 'fav-active' : '';
+      const syncStatus = track._uploading ? '同步中' : (track._uploadFailed ? '同步失败' : '');
+      const durationText = track.duration ? this.formatTime(track.duration) : '--:--';
+      const metaText = syncStatus ? `${durationText} · ${syncStatus}` : durationText;
       return `
         <div class="playlist-item ${isActive ? 'active' : ''}" data-index="${i}">
           <span class="pi-index">${i + 1}</span>
           <div class="pi-info">
             <div class="pi-title">${track.name}</div>
-            <div class="pi-duration">${track.duration ? this.formatTime(track.duration) : '--:--'}</div>
+            <div class="pi-duration">${metaText}</div>
           </div>
           <div class="pi-actions">
             <button class="pi-fav ${favClass}" data-fav="${i}" title="${track.favorite ? '取消收藏' : '收藏'}">${track.favorite ? '★' : '☆'}</button>
@@ -1311,7 +1792,11 @@ const UI = {
       const removeBtn = e.target.closest('[data-remove]');
       if (removeBtn) {
         e.stopPropagation();
-        Playlist.removeTrack(parseInt(removeBtn.dataset.remove));
+        const index = parseInt(removeBtn.dataset.remove);
+        const track = State.playlist[index];
+        if (track && window.confirm(`确定删除「${track.name}」吗？`)) {
+          Playlist.removeTrack(index);
+        }
         return;
       }
       const item = e.target.closest('[data-index]');
@@ -1319,6 +1804,68 @@ const UI = {
         Playlist.playTrackAt(parseInt(item.dataset.index));
       }
     };
+
+    const closeMobilePlaylistIfOpen = () => {
+      const panelLeft = document.querySelector('.panel-left');
+      const mobileBackdrop = document.getElementById('mobilePlaylistBackdrop');
+      panelLeft?.classList.remove('mobile-open');
+      mobileBackdrop?.classList.remove('show');
+    };
+
+    const handlePlaylistSelect = (e) => {
+      const now = Date.now();
+      if (container._lastSelectAt && now - container._lastSelectAt < 350) return;
+      container._lastSelectAt = now;
+      if (e.type === 'click' && container._lastTouchSelectAt && now - container._lastTouchSelectAt < 500) return;
+      if (e.type !== 'click') container._lastTouchSelectAt = now;
+      if (e.type === 'touchend' && container._touchMoved) return;
+
+      const favBtn = e.target.closest('[data-fav]');
+      if (favBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        Playlist.toggleFavorite(parseInt(favBtn.dataset.fav));
+        return;
+      }
+
+      const removeBtn = e.target.closest('[data-remove]');
+      if (removeBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const index = parseInt(removeBtn.dataset.remove);
+        const track = State.playlist[index];
+        if (track && window.confirm(`确定删除「${track.name}」吗？`)) {
+          Playlist.removeTrack(index);
+        }
+        return;
+      }
+
+      const item = e.target.closest('[data-index]');
+      if (item) {
+        e.preventDefault();
+        e.stopPropagation();
+        AudioEngine.resumeContext();
+        Playlist.playTrackAt(parseInt(item.dataset.index));
+        closeMobilePlaylistIfOpen();
+      }
+    };
+
+    container.ontouchstart = (e) => {
+      const touch = e.changedTouches?.[0];
+      container._touchStartX = touch?.clientX ?? 0;
+      container._touchStartY = touch?.clientY ?? 0;
+      container._touchMoved = false;
+    };
+    container.ontouchmove = (e) => {
+      const touch = e.changedTouches?.[0];
+      if (!touch) return;
+      const dx = Math.abs((touch.clientX ?? 0) - (container._touchStartX ?? 0));
+      const dy = Math.abs((touch.clientY ?? 0) - (container._touchStartY ?? 0));
+      if (dx > 10 || dy > 10) container._touchMoved = true;
+    };
+    container.onclick = handlePlaylistSelect;
+    container.onpointerup = handlePlaylistSelect;
+    container.ontouchend = handlePlaylistSelect;
   },
 
   updateVolumeIcon() {

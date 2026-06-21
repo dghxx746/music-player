@@ -1,9 +1,11 @@
 /**
  * GET /api/songs
- * List all songs for demo-user
+ * List songs for the current anonymous user
  * 
  * Bindings: DB (D1)
  */
+
+const PUBLIC_USER_ID = 'public_library';
 
 function corsHeaders(origin) {
   return {
@@ -13,12 +15,16 @@ function corsHeaders(origin) {
   };
 }
 
+function getUserId(request) {
+  return PUBLIC_USER_ID;
+}
+
 export async function onRequestGet(context) {
   const { env, request } = context;
   const origin = request.headers.get('Origin');
 
   try {
-    const userId = 'demo-user';
+    const userId = getUserId(request);
 
     const { results } = await env.DB.prepare(
       `SELECT id, name, type, size, duration, favorite, play_count, last_position, created_at, updated_at

@@ -1,28 +1,63 @@
 /**
  * GET /api/stream/:id
- * Stream audio file from R2
- * 
+ * Stream audio file from R2.
+ *
  * Bindings: MUSIC_BUCKET (R2), DB (D1)
  */
 
 const CONTENT_TYPES = {
-  'mp3': 'audio/mpeg',
-  'wav': 'audio/wav',
-  'ogg': 'audio/ogg',
-  'flac': 'audio/flac',
-  'm4a': 'audio/mp4',
-  'aac': 'audio/aac',
-  'wma': 'audio/x-ms-wma',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  flac: 'audio/flac',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  wma: 'audio/x-ms-wma',
 };
+
+const PUBLIC_USER_ID = 'public_library';
 
 function getContentType(type) {
   if (!type) return 'audio/mpeg';
   if (CONTENT_TYPES[type]) return CONTENT_TYPES[type];
-  // Try extracting from mime type
   for (const [ext, mime] of Object.entries(CONTENT_TYPES)) {
     if (type.includes(ext)) return mime;
   }
   return type || 'audio/mpeg';
+}
+
+function parseRange(rangeHeader, size) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader || '');
+  if (!match) return null;
+
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === '' && rawEnd === '') return null;
+
+  let start;
+  let end;
+
+  if (rawStart === '') {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    start = Math.max(size - suffixLength, 0);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === '' ? size - 1 : Number(rawEnd);
+  }
+
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) {
+    return null;
+  }
+
+  return {
+    start,
+    end: Math.min(end, size - 1),
+  };
+}
+
+function getUserId(request) {
+  return PUBLIC_USER_ID;
 }
 
 export async function onRequestGet(context) {
@@ -30,11 +65,17 @@ export async function onRequestGet(context) {
 
   try {
     const { id } = params;
+    const userId = getUserId(request);
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '缺少或非法的用户标识' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
-    // Query song from D1
     const song = await env.DB.prepare(
-      `SELECT id, r2_key, type, name FROM songs WHERE id = ? AND user_id = 'demo-user'`
-    ).bind(id).first();
+      `SELECT id, r2_key, type, name FROM songs WHERE id = ? AND user_id = ?`
+    ).bind(id, userId).first();
 
     if (!song) {
       return new Response(JSON.stringify({ error: '歌曲不存在' }), {
@@ -43,10 +84,9 @@ export async function onRequestGet(context) {
       });
     }
 
-    // Get object from R2
-    const object = await env.MUSIC_BUCKET.get(song.r2_key);
+    const objectHead = await env.MUSIC_BUCKET.head(song.r2_key);
 
-    if (!object) {
+    if (!objectHead) {
       return new Response(JSON.stringify({ error: '文件不存在' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json' },
@@ -54,22 +94,36 @@ export async function onRequestGet(context) {
     }
 
     const contentType = getContentType(song.type);
-
-    // Support Range requests for seeking
+    const objectSize = objectHead.size;
     const range = request.headers.get('Range');
 
     if (range) {
-      const objectSize = object.size;
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : objectSize - 1;
+      const parsedRange = parseRange(range, objectSize);
+
+      if (!parsedRange) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            'Content-Range': `bytes */${objectSize}`,
+            'Accept-Ranges': 'bytes',
+          },
+        });
+      }
+
+      const { start, end } = parsedRange;
       const chunkSize = end - start + 1;
+      const object = await env.MUSIC_BUCKET.get(song.r2_key, {
+        range: { offset: start, length: chunkSize },
+      });
 
-      // Get the full array buffer and slice
-      const fullBuffer = await object.arrayBuffer();
-      const slice = fullBuffer.slice(start, end + 1);
+      if (!object) {
+        return new Response(JSON.stringify({ error: '文件不存在' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
-      return new Response(slice, {
+      return new Response(object.body, {
         status: 206,
         headers: {
           'Content-Type': contentType,
@@ -81,11 +135,19 @@ export async function onRequestGet(context) {
       });
     }
 
-    // Full response
+    const object = await env.MUSIC_BUCKET.get(song.r2_key);
+
+    if (!object) {
+      return new Response(JSON.stringify({ error: '文件不存在' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     return new Response(object.body, {
       headers: {
         'Content-Type': contentType,
-        'Content-Length': String(object.size),
+        'Content-Length': String(objectSize),
         'Accept-Ranges': 'bytes',
         'Cache-Control': 'public, max-age=3600',
         'Content-Disposition': `inline; filename="${encodeURIComponent(song.name)}"`,

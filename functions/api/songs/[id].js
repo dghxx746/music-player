@@ -5,6 +5,8 @@
  * Bindings: MUSIC_BUCKET (R2), DB (D1)
  */
 
+const PUBLIC_USER_ID = 'public_library';
+
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
@@ -13,18 +15,29 @@ function corsHeaders(origin) {
   };
 }
 
+function getUserId(request) {
+  return PUBLIC_USER_ID;
+}
+
 export async function onRequestPatch(context) {
   const { request, env, params } = context;
   const origin = request.headers.get('Origin');
 
   try {
     const { id } = params;
+    const userId = getUserId(request);
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '缺少或非法的用户标识' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
+      });
+    }
     const body = await request.json();
 
     // Check song exists
     const song = await env.DB.prepare(
-      `SELECT id FROM songs WHERE id = ? AND user_id = 'demo-user'`
-    ).bind(id).first();
+      `SELECT id FROM songs WHERE id = ? AND user_id = ?`
+    ).bind(id, userId).first();
 
     if (!song) {
       return new Response(JSON.stringify({ error: '歌曲不存在' }), {
@@ -63,9 +76,10 @@ export async function onRequestPatch(context) {
 
     updates.push("updated_at = datetime('now')");
     values.push(id);
+    values.push(userId);
 
     await env.DB.prepare(
-      `UPDATE songs SET ${updates.join(', ')} WHERE id = ?`
+      `UPDATE songs SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`
     ).bind(...values).run();
 
     return new Response(JSON.stringify({ success: true }), {
@@ -86,11 +100,18 @@ export async function onRequestDelete(context) {
 
   try {
     const { id } = params;
+    const userId = getUserId(request);
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '缺少或非法的用户标识' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
+      });
+    }
 
     // Find song to get r2_key
     const song = await env.DB.prepare(
-      `SELECT id, r2_key FROM songs WHERE id = ? AND user_id = 'demo-user'`
-    ).bind(id).first();
+      `SELECT id, r2_key FROM songs WHERE id = ? AND user_id = ?`
+    ).bind(id, userId).first();
 
     if (!song) {
       return new Response(JSON.stringify({ error: '歌曲不存在' }), {
@@ -108,8 +129,8 @@ export async function onRequestDelete(context) {
 
     // Delete from D1
     await env.DB.prepare(
-      `DELETE FROM songs WHERE id = ?`
-    ).bind(id).run();
+      `DELETE FROM songs WHERE id = ? AND user_id = ?`
+    ).bind(id, userId).run();
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
